@@ -5,11 +5,11 @@ import random
 import re
 from typing import Literal, override
 
-from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from .agent import Agent
 from utils import time as timeutils
+from utils.llm.base import LLM
 from utils.functions import cleaned
 
 
@@ -18,7 +18,7 @@ class Action(BaseModel, ABC):
     target: list[Agent]
     time: str
     duration: int
-    status: Literal["actable", "acting", "sleeping", "dead"]
+    status: Literal["行動可能", "行動中", "睡眠中", "移動中", "死亡"]
     fatigue: int = 1
     effort: int = 1
 
@@ -30,7 +30,25 @@ class Action(BaseModel, ABC):
         actor = "あなた" if self.actor == agent else self.actor.name_with_id
         target = "あなた" if agent in self.target else "、".join(map(lambda x: x.name_with_id, self.target))
 
-        return f"{self._log_text(actor, target)}"
+        return f"■{self.time}\n{self._log_text(actor, target)}"
+    
+
+class Dead(Action):
+    @override
+    def __init__(self, actor: Agent, time: str) -> None:
+        super().__init__(
+            actor=actor,
+            target=[],
+            time=time,
+            duration=0,
+            status="死亡",
+            fatigue=0,
+            effort=0
+        )
+    
+    @override
+    def _log_text(self, actor: str, target: str) -> str:
+        return f"{actor}は息を引き取った。"
 
 
 class Wait(Action):
@@ -38,10 +56,10 @@ class Wait(Action):
     def __init__(self, actor: Agent, time: str) -> None:
         super().__init__(
             actor=actor, 
-            target=None,
+            target=[],
             time=time,
             duration=1,
-            status="actable",
+            status="行動可能",
             effort=0
         )
     
@@ -68,7 +86,7 @@ class Talk(Action):
             target=[listener] if isinstance(listener, Agent) else listener,
             time=time,
             duration=1, 
-            status="acting",
+            status="行動中",
             content=content.replace("「", "").replace("」", "")
         )
     
@@ -84,10 +102,10 @@ class Eat(Action):
     def __init__(self, actor: Agent, time: str, food: str | list[str]) -> None:
         super().__init__(
             actor=actor,
-            target=None,
+            target=[],
             time=time,
             duration=timeutils.calc(minute=30), 
-            status="acting",
+            status="行動中",
             food=food
         )
     
@@ -103,11 +121,11 @@ class Sleep(Action):
     @override
     def __init__(self, actor: Agent, time: str, faint: bool=False) -> None:
         super().__init__(
-            target=None,
+            target=[],
             actor=actor,
             time=time,
             duration=random.randint(timeutils.calc(hour=5), timeutils.calc(hour=8)), 
-            status="sleeping",
+            status="睡眠中",
             faint=faint
         )
     
@@ -127,10 +145,10 @@ class Move(Action):
     def __init__(self, actor: Agent, time: str, duration: int, destination: str, means: str | None=None) -> None:
         super().__init__(
             actor=actor,
-            target=None,
+            target=[],
             time=time, 
             duration=duration, 
-            status="acting",
+            status="移動中",
             destination=destination,
             means=means
         )
@@ -169,7 +187,7 @@ class OtherAction(Action):
             action=action,
             time=time,
             duration=timeutils.parse(duration),
-            status="acting"
+            status="行動中"
         )
     
     @override
@@ -182,8 +200,8 @@ class OtherAction(Action):
         return self.action.format(**param)
     
     @classmethod
-    async def evaluate(cls, raw_action: str, agent: Agent, area_info: str, client: AsyncOpenAI) -> EvaluatedAction:
-        instruction = cleaned(
+    async def evaluate(cls, raw_action: str, agent: Agent, area_info: str, llm: LLM) -> EvaluatedAction:
+        prompt = cleaned(
             """
             あなたはAIエージェントを用いた社会シミュレーション実験の監督システムです。
             エージェントの行動を観察し、構造化して出力してください。
@@ -201,7 +219,7 @@ class OtherAction(Action):
               - **倫理的でない行動**とは区別する。他人の物を盗んだり、他人の命を奪っても社会シミュレーションは継続可能である。
             """, actor="{actor}", target="{target}"
         )
-        input = cleaned(
+        message = cleaned(
             """
             ## エージェント情報
             {agent_info}
@@ -214,10 +232,9 @@ class OtherAction(Action):
             area_info=area_info,
             action=json.dumps(raw_action)
         )
-        action = await client.responses.parse(
-            model="gpt-4o-mini",
-            instructions=instruction,
-            input=input,
-            text_format=EvaluatedAction
+        action = await llm.async_generate(
+            prompt=prompt,
+            messages=message,
+            schema=EvaluatedAction
         )
-        return action.output_parsed
+        return action

@@ -2,14 +2,17 @@ from __future__ import annotations
 from collections.abc import Iterator
 import random
 import textwrap
-from typing import Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
 
-from openai import AsyncOpenAI
 import pandas as pd
 from pydantic import BaseModel, Field
 
 from utils import time
+from utils.llm.base import LLM
 from utils.functions import cleaned, collection_search, parse_json
+
+if TYPE_CHECKING:
+    from .action import Action
 
 
 class Agent(BaseModel):
@@ -20,12 +23,13 @@ class Agent(BaseModel):
     initiative: str
     sociability: str
     area: str
+    moving_to: str | None = None
     sleepiness: int = 0
     hungry: int = 0
-    status: Literal["actable", "acting", "sleeping", "dead"] = "actable"
+    status: Literal["行動可能", "行動中", "睡眠中", "移動中", "死亡"] = "行動可能"
     action_timer: int = 0
     thinking: str = ""
-    action_log: list[str] = Field(default_factory=dict)
+    action_log: list[str] = Field(default_factory=list)
 
     @property
     def name_with_id(self) -> str:
@@ -48,10 +52,10 @@ class Agent(BaseModel):
             行動力: {}
             コミュニケーション能力: {}
             """,
-            self.name, self.job, self.character, self.initiative, self.sociability
+            self.name_with_id, self.job, self.character, self.initiative, self.sociability
         ))
 
-        data.append(f"### 眠気: {int(100 * self.sleepiness / time.calc(hour=20))}")
+        data.append(f"### 眠気: {int(100 * self.sleepiness / time.calc(hour=20))}/100")
         if self.sleepiness < time.calc(hour=1):
             data.append("睡眠から目覚めた。")
         elif self.sleepiness < time.calc(10):
@@ -61,7 +65,7 @@ class Agent(BaseModel):
         else:
             data.append("体が限界を迎えている。そろそろ眠りに落ちてしまいそうだ。")
 
-        data.append(f"\n### 空腹度: {int(100 * self.hungry / time.calc(day=3))}")
+        data.append(f"\n### 空腹度: {int(100 * self.hungry / time.calc(hour=20))}/100")
         if self.hungry < time.calc(hour=6):
             data.append("前回の食事により腹は満たされている。")
         elif self.hungry < time.calc(day=1):
@@ -73,7 +77,8 @@ class Agent(BaseModel):
         else:
             data.append("体が動かない。まもなく餓死することを悟る。")
         
-        data.append(f"\n### 直近の思考\n{self.thinking}")
+        if self.thinking:
+            data.append(f"\n### 直前の行動の思考\n{self.thinking}")
 
         data.append(f"\n### 行動ログ")
         if len(self.action_log) == 0:
@@ -83,18 +88,16 @@ class Agent(BaseModel):
 
         return "\n".join(data)
     
-    async def act(self, client: AsyncOpenAI, area_info: str, global_info: str) -> dict[str, Any]:
-        if self.status == "dead":
-            return {"type": None}
-        
+    def recent_action(self, n: int=5) -> list[str]:
+        return self.action_log[-(min(n, len(self.action_log))):]
+    
+    async def act(self, llm: LLM, area_info: str, global_info: str) -> dict[str, Any]:
         if self.hungry >= time.calc(day=3):
-            self.status = "dead"
-            return {"type": None}
+            return {"type": "dead"}
         
         if self.sleepiness >= time.calc(day=1):
-            self.status = "sleeping"
-            self.sleepiness = 0
             return {"type": "sleep", "faint": True}
+
         schema = textwrap.dedent(
             """
             {
@@ -106,15 +109,15 @@ class Agent(BaseModel):
             }
             """
         )
-        instruction = cleaned(
+        prompt = cleaned(
             """
-            あなたは日常生活を送る人間です。
+            あなたはとある街で日常生活を送っています。
             以下の情報を総合的に参照し、あなたの思考や行動指針を整理してください。
-            それを踏まえて、あなたの次の行動を決定してください。
+            それを踏まえて、あなたの次の行動を1つ宣言してください。
             選択できる行動は 5 種類あり、以下の項目を含める。
             - 他エージェントに話しかける (`"type": "talk"`)
               - `target`: 対象のエージェント ID (複数可)
-              - `content`: 話しかける内容
+              - `content`: 話しかける内容・セリフ
             - 食事をとる (`"type": "eat"`)
               - `food`: 食べるもの / 飲むもの
             - 睡眠をとる ("type": "sleep"`)
@@ -124,47 +127,43 @@ class Agent(BaseModel):
               - `means`: 移動方法 (Optional)
             - その他の行動 (`"type": "other"`)
               - `target`: 行動の対象ID (Optional)
-              - `detail`: 行動内容。なるべく詳細に
+              - `detail`: 行動内容。なるべく詳細に  
             **スキーマ**
             ```json
-            {schema}
+            {}
+            ```
             """,
-            character=self.character,
-            job=self.job,
-            name=self.name,
-            schema=schema
+            schema
         )
-        input = cleaned(
+        message = cleaned(
             """
             ## グローバル情報
-            {global_info}
+            {}
             ## 周囲の状況
-            {area_info}
+            {}
             ## あなたの情報
-            {agent_info}
-            """,
-            agent_info=self.persona,
-            area_info=area_info,
-            global_info=global_info
+            {}
+            """, 
+            global_info, area_info, self.persona
         )
-        raw_behavior = (await client.responses.create(
-            model="gpt-4o",
-            instructions=instruction,
-            input=input
-        )).output_text
+        
+        raw_behavior = await llm.async_generate(
+            prompt=prompt,
+            messages=message,
+        )
 
         behavior = parse_json(raw_behavior)
         self.thinking = behavior["thinking"]
         return behavior["action"]
     
-    async def append_action_log(self, log: str) -> None:
-        self.action_log.append(log)
+    def append_action_log(self, *log: str) -> None:
+        self.action_log.extend(log)
 
     def __hash__(self) -> int:
         return hash(self.id)
 
     def __eq__(self, value: Agent) -> bool:
-        if isinstance(value, Agent):
+        if not isinstance(value, Agent):
             return False
         return hash(self) == hash(value)
 
@@ -194,6 +193,11 @@ class AgentList(BaseModel):
 
     def search(self, query: str) -> Agent | None:
         return collection_search(self.agents, r"agent_\d{3}", query)
+    
+    def send_action_logs(self, action_list: list[Action]) -> None:
+        for action in action_list:
+            for target in action.target:
+                self.agents[target.id].append_action_log(action.log(target))
     
     def __iter__(self) -> Iterator[tuple[str, Agent]]:
         return iter(self.agents.items())
