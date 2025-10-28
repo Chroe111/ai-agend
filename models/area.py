@@ -1,5 +1,7 @@
 from __future__ import annotations
 import asyncio
+import json
+import re
 
 import pandas as pd
 from pydantic import BaseModel, Field, PrivateAttr
@@ -13,6 +15,7 @@ from utils.functions import cleaned, collection_search
 class Area(BaseModel):
     id: str
     name: str
+    description: str
     agents: list[str] = Field(default_factory=list)
     action_log: list[str] = Field(default_factory=list)
     summary: str = Field(default="")
@@ -23,8 +26,20 @@ class Area(BaseModel):
 
     @property
     def info(self) -> str:
-        people = "\n".join(f"- {agent}" for agent in self.agents)
-        return f"{self.summary}\n### {self.name_with_id}\n■ここにいる人\n{people}"
+        people = "\n".join(map(lambda x: f"- {x}", self.agents))
+        return cleaned(
+            """
+            ### {}
+            {}
+
+            ■情報
+            {}
+
+            ■ここにいる人
+            {}
+            """,
+            self.name_with_id, self.description, self.summary, people
+        )
     
     def append_action_log(self, *log: str) -> None:
         self.action_log.extend(log)
@@ -36,8 +51,7 @@ class Area(BaseModel):
             エリア: {area} で起きた行動をもとに、現在のエリアの情報を更新してください。
             ### 方針
             - 1~2行程度で簡潔にまとめる。
-            - 個々の行動については触れず、サマリーとして記述する。
-              - ただしイベントや事件等、大きな影響を与えうる場合はその限りではない。
+            - イベントや事件等、大きな影響を与えうる場合は特筆する。
             - 特に書くことがない場合、いつも通りの日常が流れていることを描写する。
             """,
             area=self.name_with_id
@@ -70,21 +84,38 @@ class Location(BaseModel):
 
     @classmethod
     def from_json_file(cls, filepath: str) -> Location:
-        df = pd.read_json(filepath)
-        areas = {(id := f"area_{str(i).zfill(2)}"): Area(id=id, name=name) for i, name in enumerate(df.index)}
+        with open(filepath) as f:
+            data = json.load(f)
+
+        df = pd.DataFrame(data["distance_matrix"])
+        areas = {
+            (id := f"area_{str(i).zfill(2)}"): Area(
+                id=id, 
+                name=name,
+                description=data["places_description"][name]
+            ) for i, name in enumerate(data["places"])
+        }
         df = df.set_axis(areas.keys(), axis="index").set_axis(areas.keys(), axis="columns")
         df = df.map(lambda x: x // 10 + int(x % 10 >= 5))
+
         location = cls(areas=areas)
         location._loads = df
         return location
     
-    def search(self, query: str) -> Area:
-        return collection_search(self.areas, r"area_\d{2}", query)
+    @staticmethod
+    def search_id(query: str) -> str | None:
+        result = re.search(r"area_\d{2}", query)
+        return None if result is None else result.group()
+    
+    def search(self, query: str) -> Area | None:
+        return self.areas.get(self.search_id(query), None)
     
     def update_log(self, action_logs: list[Action]) -> None:
-        print(action_logs)
+        logs = {area_id: [] for area_id in self.areas.keys()}
         for action in action_logs:
-            self.areas[action.actor.area].append_action_log(action.log(None))
+            logs[action.actor.area].append(action.log(None))
+        for area_id, log in logs.items():
+            self.areas[area_id].action_log = log
     
     def update_agents(self, agent_list: AgentList) -> None:
         agent_changes: dict[str, list[str]] = {}

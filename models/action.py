@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 import json
 import random
 import re
-from typing import Literal, override
+from typing import Any, Literal, override
 
 from pydantic import BaseModel
 
@@ -21,6 +21,7 @@ class Action(BaseModel, ABC):
     status: Literal["行動可能", "行動中", "睡眠中", "移動中", "死亡"]
     fatigue: int = 1
     effort: int = 1
+    raw_action: Any
 
     @abstractmethod
     def _log_text(self, actor: str, target: str) -> str:
@@ -35,7 +36,7 @@ class Action(BaseModel, ABC):
 
 class Dead(Action):
     @override
-    def __init__(self, actor: Agent, time: str) -> None:
+    def __init__(self, actor: Agent, time: str, raw_action: Any=None) -> None:
         super().__init__(
             actor=actor,
             target=[],
@@ -43,7 +44,8 @@ class Dead(Action):
             duration=0,
             status="死亡",
             fatigue=0,
-            effort=0
+            effort=0,
+            raw_action=raw_action
         )
     
     @override
@@ -53,14 +55,15 @@ class Dead(Action):
 
 class Wait(Action):
     @override
-    def __init__(self, actor: Agent, time: str) -> None:
+    def __init__(self, actor: Agent, time: str, raw_action: Any=None) -> None:
         super().__init__(
             actor=actor, 
             target=[],
             time=time,
             duration=1,
             status="行動可能",
-            effort=0
+            effort=0,
+            raw_action=raw_action
         )
     
     @override
@@ -80,14 +83,22 @@ class Talk(Action):
         return self.target
     
     @override
-    def __init__(self, speaker: Agent, listener: Agent | list[Agent], time: str, content: str) -> None:
+    def __init__(
+            self, 
+            speaker: Agent, 
+            listener: Agent | list[Agent], 
+            time: str, 
+            content: str, 
+            raw_action: Any = None
+    ) -> None:
         super().__init__(
             actor=speaker,
             target=[listener] if isinstance(listener, Agent) else listener,
             time=time,
             duration=1, 
             status="行動中",
-            content=content.replace("「", "").replace("」", "")
+            content=content.replace("「", "").replace("」", ""),
+            raw_action=raw_action
         )
     
     @override
@@ -99,14 +110,15 @@ class Eat(Action):
     food: str | list[str]
 
     @override
-    def __init__(self, actor: Agent, time: str, food: str | list[str]) -> None:
+    def __init__(self, actor: Agent, time: str, food: str | list[str], raw_action: Any=None) -> None:
         super().__init__(
             actor=actor,
             target=[],
             time=time,
             duration=timeutils.calc(minute=30), 
             status="行動中",
-            food=food
+            food=food,
+            raw_action=raw_action
         )
     
     @override
@@ -119,14 +131,15 @@ class Sleep(Action):
     faint: bool
 
     @override
-    def __init__(self, actor: Agent, time: str, faint: bool=False) -> None:
+    def __init__(self, actor: Agent, time: str, faint: bool=False, raw_action: Any=None) -> None:
         super().__init__(
             target=[],
             actor=actor,
             time=time,
             duration=random.randint(timeutils.calc(hour=5), timeutils.calc(hour=8)), 
             status="睡眠中",
-            faint=faint
+            faint=faint,
+            raw_action=raw_action
         )
     
     @override
@@ -142,7 +155,15 @@ class Move(Action):
     means: str | None
 
     @override
-    def __init__(self, actor: Agent, time: str, duration: int, destination: str, means: str | None=None) -> None:
+    def __init__(
+            self, 
+            actor: Agent, 
+            time: str, 
+            duration: int, 
+            destination: str, 
+            means: str | None = None,
+            raw_action: Any = None
+    ) -> None:
         super().__init__(
             actor=actor,
             target=[],
@@ -179,7 +200,8 @@ class OtherAction(Action):
             target: Agent | list[Agent] | None, 
             time: str, 
             duration: str, 
-            action: str
+            action: str,
+            raw_action: Any = None
     ) -> None:
         super().__init__(
             actor=actor,
@@ -187,7 +209,8 @@ class OtherAction(Action):
             action=action,
             time=time,
             duration=timeutils.parse(duration),
-            status="行動中"
+            status="行動中",
+            raw_action=raw_action
         )
     
     @override

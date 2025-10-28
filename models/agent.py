@@ -1,6 +1,7 @@
 from __future__ import annotations
 from collections.abc import Iterator
 import random
+import re
 import textwrap
 from typing import Any, Literal, TYPE_CHECKING
 
@@ -190,6 +191,14 @@ class AgentList(BaseModel):
                 hungry=time.calc(hour=7)
             ) for i, row in df.iterrows()
         })
+    
+    @staticmethod
+    def search_id(query: str) -> str | None:
+        result = re.search(r"agent_\d{3}", query)
+        return None if result is None else result.group()
+    
+    def search(self, query: str) -> Agent | None:
+        return self.agents.get(self.search_id(query), None)
 
     def search(self, query: str) -> Agent | None:
         return collection_search(self.agents, r"agent_\d{3}", query)

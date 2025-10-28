@@ -9,6 +9,7 @@ from .area import Location
 from utils import settings
 from utils.functions import cleaned
 from utils.llm.base import LLM
+from utils import logger
 from utils.time import Clock
 
 
@@ -55,23 +56,32 @@ class Society(BaseModel):
             llm: LLM
     ) -> Action:
         await asyncio.sleep(0)
+        if isinstance(raw_action, list):
+            raw_action = raw_action[0]
 
         target = [self.agent_list.search(t) for t in raw_action.get("target", "")]
         action_type = raw_action.pop("type")
         try:
             if action_type == "dead":
-                action = Dead(actor, self.clock.now)
+                action = Dead(actor, self.clock.now, raw_action)
             if action_type == "talk":
                 assert target
-                action = Talk(actor, target, self.clock.now, raw_action["content"])
+                action = Talk(actor, target, self.clock.now, raw_action["content"], raw_action)
             elif action_type == "eat":
-                action = Eat(actor, self.clock.now, raw_action["food"])
+                action = Eat(actor, self.clock.now, raw_action["food"], raw_action)
             elif action_type == "sleep":
-                action = Sleep(actor, self.clock.now)
+                action = Sleep(actor, self.clock.now, raw_action)
             elif action_type == "move":
                 assert (destination := self.location.search(raw_action["destination"]))
                 duration = self.location.travel_time(actor.area, destination.id)
-                action = Move(actor, self.clock.now, duration, destination.name_with_id, raw_action.get("means"))
+                action = Move(
+                    actor, 
+                    self.clock.now, 
+                    duration, 
+                    destination.name_with_id, 
+                    raw_action.get("means"),
+                    raw_action
+                )
             elif action_type == "other":
                 evaluated_action = await OtherAction.evaluate(
                     raw_action, 
@@ -85,12 +95,13 @@ class Society(BaseModel):
                     target, 
                     self.clock.now, 
                     evaluated_action.duration, 
-                    evaluated_action.action
+                    evaluated_action.action,
+                    raw_action
                 )
             else:
                 raise ValueError
         except Exception:
-            action = Wait(actor, self.clock.now)
+            action = Wait(actor, self.clock.now, raw_action)
 
         return action
     
@@ -104,7 +115,7 @@ class Society(BaseModel):
             else:
                 agent.action_timer = action.duration
                 if isinstance(action, Move):
-                    agent.moving_to = action.destination
+                    agent.moving_to = self.location.search_id(action.destination)
                 agent.status = action.status
                 agent.append_action_log(action.log(agent))
         else:
@@ -121,10 +132,17 @@ class Society(BaseModel):
 
         return action
     
-    async def step_all(self, llm: LLM) -> list[Action]:
-        actions = await asyncio.gather(*(self.step(agent, llm) for _, agent in self.agent_list if agent.status != "死亡"))
-        self.agent_list.send_action_logs([action for action in actions if not action is None])
-        await self.location.update(llm, actions, self.agent_list, self.info)
-        self.clock.step()
+    async def step_all(self, llm: LLM, debug: bool=False) -> list[Action]:
+        logger.print(f"ステップ開始: {self.clock.now}", debug)
 
+        actions = await asyncio.gather(*(self.step(agent, llm) for _, agent in self.agent_list if agent.status != "死亡"))
+        actions = [action for action in actions if not action is None]
+        self.agent_list.send_action_logs(actions)
+        logger.print(f"アクション宣言完了", debug)
+
+        await self.location.update(llm, actions, self.agent_list, self.info)
+        logger.print(f"エリア更新完了", debug)
+
+        self.clock.step()
+        logger.print(f"ステップ終了", debug)
         return actions
